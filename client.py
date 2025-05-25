@@ -4,6 +4,8 @@ from pynput.keyboard import Listener as KeyListener
 import pyautogui as pag
 import keyboard  # Библиотека для обработки клавиш
 import zlib
+import time
+import math
 
 screen_width, screen_height = pag.size()
 
@@ -14,19 +16,28 @@ CTRL_PORT = 5002
 ctrl_sock = socket.socket()
 ctrl_sock.connect((SERVER_IP, CTRL_PORT))
 
-# Добавляем глобальный словарь для отслеживания состояния клавиш
-pressed_keys = set()
-
 # Функция для обработки нажатий клавиш
 def send_command(cmd):
     data = json.dumps(cmd).encode()
     length = len(data).to_bytes(4, 'big')  # 4 байта для длины сообщения
     ctrl_sock.sendall(length + data)  # Отправляем длину + данные
 
+# Добавляем глобальный словарь для отслеживания времени последнего нажатия клавиш
+key_timestamps = {}
+
+# Минимальный интервал между обработкой повторных нажатий одной клавиши (в секундах)
+KEY_PRESS_INTERVAL = 0.1
+
 def handle_keyboard():
     # Обработка нажатий клавиш
     def on_press(event):
-        send_command({"type": "keypress", "key": event.name})
+        current_time = time.time()
+        last_time = key_timestamps.get(event.name, 0)
+
+        # Проверяем, прошло ли достаточно времени с последнего нажатия
+        if current_time - last_time > KEY_PRESS_INTERVAL:
+            key_timestamps[event.name] = current_time
+            send_command({"type": "keypress", "key": event.name})
 
     # Обработка отпусканий клавиш
     def on_release(event):
@@ -63,54 +74,69 @@ def receive_images():
     is_fullscreen = [True]
 
     # 🖱️ Обработка событий мыши в окне
-    # Вставка внутрь функции receive_images
-
     last_click_time = [0]
     is_dragging = [False]
 
+    # Создаём словарь для хранения состояния
+    mouse_state = {"last_position": [0, 0]}
+
     def mouse_callback(event, x, y, flags, param):
-        import time
+
+        MIN_MOVE_DISTANCE = 5
+        last_position = param["last_position"]
 
         if event == cv2.EVENT_MOUSEMOVE:
-            if is_dragging[0]:
-                send_command({
-                    "type": "move",
-                    "x": x,
-                    "y": y,
-                    "drag": True
-                })
-            else:
-                send_command({
-                    "type": "move",
-                    "x": x,
-                    "y": y
-                })
+            # Проверяем, переместилась ли мышь на достаточное расстояние
+            if math.hypot(x - last_position[0], y - last_position[1]) > MIN_MOVE_DISTANCE:
+                if is_dragging[0]:  # Если ЛКМ зажата
+                    send_command({
+                        "type": "move",
+                        "x": x,
+                        "y": y,
+                        "drag": True  # Указываем, что это перетаскивание
+                    })
+                else:
+                    send_command({
+                        "type": "move",
+                        "x": x,
+                        "y": y
+                    })
+                param["last_position"] = [x, y]
 
         elif event == cv2.EVENT_LBUTTONDOWN:
             now = time.time()
-            if now - last_click_time[0] < 0.3:  # Двойной клик
+            if now - last_click_time[0] < 0.7:  # Двойной клик
                 send_command({"type": "dblclick", "x": x, "y": y})
+                last_click_time[0] = 0  # Сбрасываем таймер для предотвращения тройного клика
             else:
                 send_command({"type": "mousedown", "x": x, "y": y, "button": "left"})
-                is_dragging[0] = True
+                is_dragging[0] = True  # Устанавливаем флаг перетаскивания
             last_click_time[0] = now
 
         elif event == cv2.EVENT_LBUTTONUP:
+            # Добавляем небольшую задержку перед отправкой команды отпускания
+            time.sleep(0.05)
             send_command({"type": "mouseup", "x": x, "y": y, "button": "left"})
-            is_dragging[0] = False
+            is_dragging[0] = False  # Сбрасываем флаг перетаскивания
 
-        elif event == cv2.EVENT_RBUTTONDOWN:  # ПКМ нажата
+        elif event == cv2.EVENT_RBUTTONDOWN:
             send_command({"type": "mousedown", "x": x, "y": y, "button": "right"})
 
-        elif event == cv2.EVENT_RBUTTONUP:  # ПКМ отпущена
+        elif event == cv2.EVENT_RBUTTONUP:
             send_command({"type": "mouseup", "x": x, "y": y, "button": "right"})
 
-        elif event == cv2.EVENT_MOUSEWHEEL:  # Скролл мыши
-            dy = flags >> 16  # Извлекаем направление скролла
+        elif event == cv2.EVENT_MBUTTONDOWN:
+            send_command({"type": "mousedown", "x": x, "y": y, "button": "middle"})
+
+        elif event == cv2.EVENT_MBUTTONUP:
+            send_command({"type": "mouseup", "x": x, "y": y, "button": "middle"})
+
+        elif event == cv2.EVENT_MOUSEWHEEL:
+            dy = flags >> 16
             send_command({"type": "scroll", "x": x, "y": y, "dy": dy})
 
-
-    cv2.setMouseCallback(window_name, mouse_callback)
+    # Передаём mouse_state в качестве параметра
+    cv2.setMouseCallback(window_name, mouse_callback, mouse_state)
 
     while True:
         try:

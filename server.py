@@ -109,4 +109,4 @@ if __name__ == "__main__":
     threading.Thread(target=start_control_server, daemon=True).start()
 
     while True:
-        time.sleep(1)  # Основной поток остается активным
+        time.sleep(1)  # Основной поток остается активным и не завершает работу
