@@ -181,6 +181,17 @@ class ServerGUI:
                 case "scroll":
                     dy = cmd.get("dy", 0)
                     pyautogui.scroll(dy)
+                case "keypress":
+                    try:
+                        pyautogui.keyDown(cmd["key"])
+                    except Exception as e:
+                        self.log(f"Ошибка нажатия клавиши {cmd['key']}: {str(e)}")
+                    
+                case "keyrelease":
+                    try:
+                        pyautogui.keyUp(cmd["key"])
+                    except Exception as e:
+                        self.log(f"Ошибка отпускания клавиши {cmd['key']}: {str(e)}")
                 case _:
                     self.log(f"Неизвестная команда: {cmd['type']}")
 

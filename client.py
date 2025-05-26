@@ -5,6 +5,7 @@ import io
 import time
 import cv2
 import math
+import keyboard
 import numpy as np
 from PIL import Image
 import zlib
@@ -22,6 +23,8 @@ class ClientGUI:
         self.sock = None
         self.control_sock = None  # Добавить
         self.mouse_state = {"last_position": [0, 0]}  # Добавить
+
+        self.keyboard_listener = None  # Добавить
 
         self.current_width = 0  # Добавить
         self.current_height = 0  # Добавить
@@ -75,6 +78,9 @@ class ClientGUI:
             self.image_thread = threading.Thread(target=self.receive_images, daemon=True)
             self.image_thread.start()
 
+            self.keyboard_listener = threading.Thread(target=self.setup_keyboard_handling, daemon=True)
+            self.keyboard_listener.start()
+
             self.control_sock = socket.socket()
             self.control_sock.connect((self.ip_entry.get(), 5002))
             
@@ -90,10 +96,35 @@ class ClientGUI:
         """Инициализация обработки событий мыши"""
         cv2.namedWindow("Remote Screen")
         cv2.setMouseCallback("Remote Screen", self.mouse_callback)
+    
+    def setup_keyboard_handling(self):
+        """Инициализация обработки клавиатуры"""
+        keyboard.on_press(self.on_key_press)
+        keyboard.on_release(self.on_key_release)
+        keyboard.wait()
+
+    def on_key_press(self, event):
+        """Обработчик нажатия клавиш"""
+        if self.is_connected and event.event_type == keyboard.KEY_DOWN:
+            self.send_control_command({
+                "type": "keypress",
+                "key": event.name
+            })
+
+    def on_key_release(self, event):
+        """Обработчик отпускания клавиш"""
+        if self.is_connected and event.event_type == keyboard.KEY_UP:
+            self.send_control_command({
+                "type": "keyrelease",
+                "key": event.name
+            })
 
     def disconnect(self):
         """Отключение от сервера"""
         self.is_connected = False
+        if self.keyboard_listener:
+            keyboard.unhook_all()
+            self.keyboard_listener = None
         if self.sock:
             self.sock.close()
         self.connect_btn.config(text="Подключиться")
@@ -162,7 +193,7 @@ class ClientGUI:
             self.control_sock.sendall(len(data).to_bytes(4, 'big') + data)
         except Exception as e:
             self.log(f"Ошибка отправки команды: {str(e)}")
-            
+
     def mouse_callback(self, event, x, y, flags, param):
             """Обработчик событий мыши"""
             MIN_MOVE_DISTANCE = 5
