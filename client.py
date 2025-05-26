@@ -1,174 +1,220 @@
-import socket, threading, struct, json, io
-from PIL import Image
-from pynput.keyboard import Listener as KeyListener
-import pyautogui as pag
-import keyboard  # Библиотека для обработки клавиш
-import zlib
+import socket
+import threading
+import json
+import io
 import time
+import cv2
 import math
+import numpy as np
+from PIL import Image
+import zlib
+import tkinter as tk
+from tkinter import ttk, scrolledtext
 
-screen_width, screen_height = pag.size()
+class ClientGUI:
+    def __init__(self):
+        self.window = tk.Tk()
+        self.window.title("Клиент трансляции экрана")
+        self.window.geometry("600x400")
 
-SERVER_IP = '192.168.206.128'
-IMG_PORT = 5001
-CTRL_PORT = 5002
+        self.is_connected = False
+        self.image_thread = None
+        self.sock = None
+        self.control_sock = None  # Добавить
+        self.mouse_state = {"last_position": [0, 0]}  # Добавить
 
-ctrl_sock = socket.socket()
-ctrl_sock.connect((SERVER_IP, CTRL_PORT))
+        self.current_width = 0  # Добавить
+        self.current_height = 0  # Добавить
 
-# Функция для обработки нажатий клавиш
-def send_command(cmd):
-    data = json.dumps(cmd).encode()
-    length = len(data).to_bytes(4, 'big')  # 4 байта для длины сообщения
-    ctrl_sock.sendall(length + data)  # Отправляем длину + данные
+        # GUI элементы
+        self.create_widgets()
+        self.window.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.window.mainloop()
 
-# Добавляем глобальный словарь для отслеживания времени последнего нажатия клавиш
-key_timestamps = {}
+    def create_widgets(self):
+        """Создание элементов интерфейса"""
+        main_frame = ttk.Frame(self.window)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-# Минимальный интервал между обработкой повторных нажатий одной клавиши (в секундах)
-KEY_PRESS_INTERVAL = 0.1
+        # Панель подключения
+        conn_frame = ttk.Frame(main_frame)
+        conn_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(conn_frame, text="IP сервера:").pack(side=tk.LEFT)
+        self.ip_entry = ttk.Entry(conn_frame, width=20)
+        self.ip_entry.pack(side=tk.LEFT, padx=5)
+        self.ip_entry.insert(0, "192.168.206.128")
 
-def handle_keyboard():
-    # Обработка нажатий клавиш
-    def on_press(event):
-        current_time = time.time()
-        last_time = key_timestamps.get(event.name, 0)
+        self.connect_btn = ttk.Button(
+            conn_frame,
+            text="Подключиться",
+            command=self.toggle_connection
+        )
+        self.connect_btn.pack(side=tk.LEFT)
 
-        # Проверяем, прошло ли достаточно времени с последнего нажатия
-        if current_time - last_time > KEY_PRESS_INTERVAL:
-            key_timestamps[event.name] = current_time
-            send_command({"type": "keypress", "key": event.name})
+        # Лог событий
+        self.log_area = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD)
+        self.log_area.pack(fill=tk.BOTH, expand=True)
+        self.log("Готов к подключению")
 
-    # Обработка отпусканий клавиш
-    def on_release(event):
-        send_command({"type": "keyrelease", "key": event.name})
+    def toggle_connection(self):
+        """Обработчик подключения/отключения"""
+        if self.is_connected:
+            self.disconnect()
+        else:
+            self.connect()
 
-    # Регистрация обработчиков
-    keyboard.on_press(on_press)
-    keyboard.on_release(on_release)
+    def connect(self):
+        """Подключение к серверу"""
+        try:
+            self.sock = socket.socket()
+            self.sock.connect((self.ip_entry.get(), 5001))
+            self.is_connected = True
+            self.connect_btn.config(text="Отключиться")
+            
+            self.image_thread = threading.Thread(target=self.receive_images, daemon=True)
+            self.image_thread.start()
 
-    # Блокируем поток, чтобы слушатель оставался активным
-    keyboard.wait()
+            self.control_sock = socket.socket()
+            self.control_sock.connect((self.ip_entry.get(), 5002))
+            
+            # Запуск обработки мыши
+            threading.Thread(target=self.setup_mouse_handling, daemon=True).start()
+            
+            self.log("Успешное подключение")
 
-# Запуск обработки клавиатуры в отдельном потоке
-threading.Thread(target=handle_keyboard, daemon=True).start()
+        except Exception as e:
+            self.log(f"Ошибка подключения: {str(e)}")
 
-def receive_images():
-    import cv2
-    import numpy as np
+    def setup_mouse_handling(self):
+        """Инициализация обработки событий мыши"""
+        cv2.namedWindow("Remote Screen")
+        cv2.setMouseCallback("Remote Screen", self.mouse_callback)
 
-    s = socket.socket()
-    s.connect((SERVER_IP, IMG_PORT))
+    def disconnect(self):
+        """Отключение от сервера"""
+        self.is_connected = False
+        if self.sock:
+            self.sock.close()
+        self.connect_btn.config(text="Подключиться")
+        cv2.destroyAllWindows()
+        self.log("Соединение разорвано")
 
-    # Получаем размер экрана
-    info_size = int.from_bytes(s.recv(4), 'big')
-    info_data = s.recv(info_size)
-    screen_info = json.loads(info_data.decode())
-    remote_w = screen_info['width']
-    remote_h = screen_info['height']
+    def log(self, message):
+        """Логирование сообщений"""
+        self.log_area.insert(tk.END, f"[{time.ctime()}] {message}\n")
+        self.log_area.see(tk.END)
 
-    window_name = "Remote Screen"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    def on_close(self):
+        """Обработчик закрытия окна"""
+        self.disconnect()
+        self.window.destroy()
 
-    is_fullscreen = [True]
+    # Ваша оригинальная функция с небольшими модификациями
+    def receive_images(self):
+        try:
+            # Получаем информацию о разрешении
+            info_size = int.from_bytes(self.sock.recv(4), 'big')
+            info_data = self.sock.recv(info_size)
+            screen_info = json.loads(info_data.decode())
 
-    # 🖱️ Обработка событий мыши в окне
-    last_click_time = [0]
-    is_dragging = [False]
+            # После получения screen_info добавить:
+            self.current_width = screen_info['width']
+            self.current_height = screen_info['height']
 
-    # Создаём словарь для хранения состояния
-    mouse_state = {"last_position": [0, 0]}
+            # Настройка окна OpenCV
+            cv2.namedWindow("Remote Screen", cv2.WINDOW_NORMAL)
+            cv2.setWindowProperty("Remote Screen", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
-    def mouse_callback(event, x, y, flags, param):
+            while self.is_connected:
+                # Получаем размер данных
+                size_data = self.sock.recv(4)
+                if not size_data:
+                    break
+                size = int.from_bytes(size_data, 'big')
+                
+                # Получаем сжатые данные
+                compressed_data = b""
+                while len(compressed_data) < size:
+                    packet = self.sock.recv(size - len(compressed_data))
+                    if not packet:
+                        break
+                    compressed_data += packet
 
-        MIN_MOVE_DISTANCE = 5
-        last_position = param["last_position"]
+                # Обработка изображения
+                decompressed = zlib.decompress(compressed_data)
+                img = Image.open(io.BytesIO(decompressed))
+                frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+                cv2.imshow("Remote Screen", frame)
 
-        if event == cv2.EVENT_MOUSEMOVE:
-            # Проверяем, переместилась ли мышь на достаточное расстояние
-            if math.hypot(x - last_position[0], y - last_position[1]) > MIN_MOVE_DISTANCE:
-                if is_dragging[0]:  # Если ЛКМ зажата
-                    send_command({
-                        "type": "move",
-                        "x": x,
-                        "y": y,
-                        "drag": True  # Указываем, что это перетаскивание
-                    })
-                else:
-                    send_command({
-                        "type": "move",
+                if cv2.waitKey(1) == 27:  # ESC для выхода
+                    break
+
+        except Exception as e:
+            self.log(f"Ошибка видеопотока: {str(e)}")
+        finally:
+            self.disconnect()
+
+    def send_control_command(self, cmd):
+        """Отправка команды управления"""
+        try:
+            data = json.dumps(cmd).encode()
+            self.control_sock.sendall(len(data).to_bytes(4, 'big') + data)
+        except Exception as e:
+            self.log(f"Ошибка отправки команды: {str(e)}")
+            
+    def mouse_callback(self, event, x, y, flags, param):
+            """Обработчик событий мыши"""
+            MIN_MOVE_DISTANCE = 5
+            last_position = self.mouse_state["last_position"]
+
+            try:
+                if event == cv2.EVENT_MOUSEMOVE:
+                    if math.hypot(x - last_position[0], y - last_position[1]) > MIN_MOVE_DISTANCE:
+                        cmd = {
+                            "type": "move",
+                            "x": x,
+                            "y": y,
+                            "width": self.current_width,
+                            "height": self.current_height
+                        }
+                        self.send_control_command(cmd)
+                        self.mouse_state["last_position"] = [x, y]
+
+                elif event == cv2.EVENT_LBUTTONDOWN:
+                    self.send_control_command({
+                        "type": "mousedown",
+                        "button": "left",
                         "x": x,
                         "y": y
                     })
-                param["last_position"] = [x, y]
 
-        elif event == cv2.EVENT_LBUTTONDOWN:
-            now = time.time()
-            if now - last_click_time[0] < 0.7:  # Двойной клик
-                send_command({"type": "dblclick", "x": x, "y": y})
-                last_click_time[0] = 0  # Сбрасываем таймер для предотвращения тройного клика
-            else:
-                send_command({"type": "mousedown", "x": x, "y": y, "button": "left"})
-                is_dragging[0] = True  # Устанавливаем флаг перетаскивания
-            last_click_time[0] = now
+                elif event == cv2.EVENT_LBUTTONUP:
+                    self.send_control_command({
+                        "type": "mouseup",
+                        "button": "left",
+                        "x": x,
+                        "y": y
+                    })
 
-        elif event == cv2.EVENT_LBUTTONUP:
-            # Добавляем небольшую задержку перед отправкой команды отпускания
-            time.sleep(0.05)
-            send_command({"type": "mouseup", "x": x, "y": y, "button": "left"})
-            is_dragging[0] = False  # Сбрасываем флаг перетаскивания
+                elif event == cv2.EVENT_RBUTTONDOWN:
+                    self.send_control_command({"type": "mousedown", "x": x, "y": y, "button": "right"})
 
-        elif event == cv2.EVENT_RBUTTONDOWN:
-            send_command({"type": "mousedown", "x": x, "y": y, "button": "right"})
+                elif event == cv2.EVENT_RBUTTONUP:
+                    self.send_control_command({"type": "mouseup", "x": x, "y": y, "button": "right"})
 
-        elif event == cv2.EVENT_RBUTTONUP:
-            send_command({"type": "mouseup", "x": x, "y": y, "button": "right"})
+                elif event == cv2.EVENT_MBUTTONDOWN:
+                    self.send_control_command({"type": "mousedown", "x": x, "y": y, "button": "middle"})
 
-        elif event == cv2.EVENT_MBUTTONDOWN:
-            send_command({"type": "mousedown", "x": x, "y": y, "button": "middle"})
+                elif event == cv2.EVENT_MBUTTONUP:
+                    self.send_control_command({"type": "mouseup", "x": x, "y": y, "button": "middle"})
 
-        elif event == cv2.EVENT_MBUTTONUP:
-            send_command({"type": "mouseup", "x": x, "y": y, "button": "middle"})
+                elif event == cv2.EVENT_MOUSEWHEEL:
+                    dy = flags >> 16
+                    self.send_control_command({"type": "scroll", "x": x, "y": y, "dy": dy})
 
-        elif event == cv2.EVENT_MOUSEWHEEL:
-            dy = flags >> 16
-            send_command({"type": "scroll", "x": x, "y": y, "dy": dy})
+            except Exception as e:
+                self.log(f"Ошибка мыши: {str(e)}")
 
-    # Передаём mouse_state в качестве параметра
-    cv2.setMouseCallback(window_name, mouse_callback, mouse_state)
-
-    while True:
-        try:
-            size_data = s.recv(4)
-            if not size_data:
-                continue
-            size = int.from_bytes(size_data, 'big')
-            buf = b""
-            while len(buf) < size:
-                packet = s.recv(size - len(buf))
-                if not packet:
-                    break
-                buf += packet
-
-            # Распаковываем данные
-            decompressed_data = zlib.decompress(buf)
-
-            img = Image.open(io.BytesIO(decompressed_data))
-            frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-            cv2.imshow(window_name, frame)
-
-            key = cv2.waitKey(1) & 0xFF
-            if key == 27:  # Esc для выхода
-                break
-
-        except Exception as e:
-            print("Image receive error:", e)
-            break
-
-    s.close()
-    cv2.destroyAllWindows()
-
-# Запуск потоков
-threading.Thread(target=receive_images).start()
-threading.Thread(target=handle_keyboard, daemon=True).start()
+if __name__ == "__main__":
+    ClientGUI()
