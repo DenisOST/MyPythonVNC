@@ -6,6 +6,7 @@ import time
 import cv2
 import math
 import keyboard
+import pyaudio
 import numpy as np
 from PIL import Image
 import zlib
@@ -17,6 +18,10 @@ class ClientGUI:
         self.window = tk.Tk()
         self.window.title("Клиент трансляции экрана")
         self.window.geometry("600x400")
+
+        self.AUDIO_PORT = 5003
+        self.audio_sock = None
+        self.is_audio_connected = False
 
         self.is_connected = False
         self.image_thread = None
@@ -78,6 +83,13 @@ class ClientGUI:
             self.image_thread = threading.Thread(target=self.receive_images, daemon=True)
             self.image_thread.start()
 
+            self.audio_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.audio_sock.connect((self.ip_entry.get(), self.AUDIO_PORT))
+
+            audio_thread = threading.Thread(target=self.receive_audio)
+            audio_thread.daemon = True
+            audio_thread.start()
+
             self.keyboard_listener = threading.Thread(target=self.setup_keyboard_handling, daemon=True)
             self.keyboard_listener.start()
 
@@ -127,6 +139,9 @@ class ClientGUI:
             self.keyboard_listener = None
         if self.sock:
             self.sock.close()
+        if self.audio_sock:
+            self.audio_sock.close()
+        self.is_audio_connected = False
         self.connect_btn.config(text="Подключиться")
         cv2.destroyAllWindows()
         self.log("Соединение разорвано")
@@ -140,6 +155,52 @@ class ClientGUI:
         """Обработчик закрытия окна"""
         self.disconnect()
         self.window.destroy()
+
+
+    def receive_audio(self):
+        try:
+            self.is_audio_connected = True
+            
+            CHUNK = 1024
+            FORMAT = pyaudio.paInt16
+            CHANNELS = 2
+            RATE = 44100
+            
+            p = pyaudio.PyAudio()
+            stream = p.open(format=FORMAT,
+                          channels=CHANNELS,
+                          rate=RATE,
+                          output=True,
+                          frames_per_buffer=CHUNK)
+            
+            while self.is_connected:
+                try:
+                    # Получаем размер данных
+                    size_data = self.audio_sock.recv(4)
+                    if not size_data:
+                        break
+                    size = int.from_bytes(size_data, 'big')
+                    
+                    # Получаем аудио данные
+                    data = b""
+                    while len(data) < size:
+                        packet = self.audio_sock.recv(size - len(data))
+                        if not packet:
+                            break
+                        data += packet
+                    
+                    stream.write(data)
+                except:
+                    break
+            
+            stream.stop_stream()
+            stream.close()
+            p.terminate()
+            self.audio_sock.close()
+            self.is_audio_connected = False
+            
+        except Exception as e:
+            self.log(f"Ошибка аудио потока: {str(e)}")
 
     # Ваша оригинальная функция с небольшими модификациями
     def receive_images(self):
@@ -155,7 +216,7 @@ class ClientGUI:
 
             # Настройка окна OpenCV
             cv2.namedWindow("Remote Screen", cv2.WINDOW_NORMAL)
-            cv2.setWindowProperty("Remote Screen", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+            #cv2.setWindowProperty("Remote Screen", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
             while self.is_connected:
                 # Получаем размер данных
@@ -195,57 +256,63 @@ class ClientGUI:
             self.log(f"Ошибка отправки команды: {str(e)}")
 
     def mouse_callback(self, event, x, y, flags, param):
-            """Обработчик событий мыши"""
-            MIN_MOVE_DISTANCE = 5
-            last_position = self.mouse_state["last_position"]
+        """Обработчик событий мыши"""
+        MIN_MOVE_DISTANCE = 5
+        last_position = self.mouse_state["last_position"]
 
-            try:
-                if event == cv2.EVENT_MOUSEMOVE:
-                    if math.hypot(x - last_position[0], y - last_position[1]) > MIN_MOVE_DISTANCE:
-                        cmd = {
-                            "type": "move",
-                            "x": x,
-                            "y": y,
-                            "width": self.current_width,
-                            "height": self.current_height
-                        }
-                        self.send_control_command(cmd)
-                        self.mouse_state["last_position"] = [x, y]
-
-                elif event == cv2.EVENT_LBUTTONDOWN:
-                    self.send_control_command({
-                        "type": "mousedown",
-                        "button": "left",
+        try:
+            if event == cv2.EVENT_MOUSEMOVE:
+                # Проверяем, переместилась ли мышь на достаточное расстояние
+                if math.hypot(x - last_position[0], y - last_position[1]) > MIN_MOVE_DISTANCE:
+                    cmd = {
+                        "type": "move",
                         "x": x,
-                        "y": y
-                    })
+                        "y": y,
+                        "width": self.current_width,
+                        "height": self.current_height,
+                        "drag": self.mouse_state.get("dragging", False)  # Указываем, идет ли перетаскивание
+                    }
+                    self.send_control_command(cmd)
+                    self.mouse_state["last_position"] = [x, y]
 
-                elif event == cv2.EVENT_LBUTTONUP:
-                    self.send_control_command({
-                        "type": "mouseup",
-                        "button": "left",
-                        "x": x,
-                        "y": y
-                    })
+            elif event == cv2.EVENT_LBUTTONDOWN:
+                # Устанавливаем флаг перетаскивания
+                self.mouse_state["dragging"] = True
+                self.send_control_command({
+                    "type": "mousedown",
+                    "button": "left",
+                    "x": x,
+                    "y": y
+                })
 
-                elif event == cv2.EVENT_RBUTTONDOWN:
-                    self.send_control_command({"type": "mousedown", "x": x, "y": y, "button": "right"})
+            elif event == cv2.EVENT_LBUTTONUP:
+                # Сбрасываем флаг перетаскивания
+                self.mouse_state["dragging"] = False
+                self.send_control_command({
+                    "type": "mouseup",
+                    "button": "left",
+                    "x": x,
+                    "y": y
+                })
 
-                elif event == cv2.EVENT_RBUTTONUP:
-                    self.send_control_command({"type": "mouseup", "x": x, "y": y, "button": "right"})
+            elif event == cv2.EVENT_RBUTTONDOWN:
+                self.send_control_command({"type": "mousedown", "x": x, "y": y, "button": "right"})
 
-                elif event == cv2.EVENT_MBUTTONDOWN:
-                    self.send_control_command({"type": "mousedown", "x": x, "y": y, "button": "middle"})
+            elif event == cv2.EVENT_RBUTTONUP:
+                self.send_control_command({"type": "mouseup", "x": x, "y": y, "button": "right"})
 
-                elif event == cv2.EVENT_MBUTTONUP:
-                    self.send_control_command({"type": "mouseup", "x": x, "y": y, "button": "middle"})
+            elif event == cv2.EVENT_MBUTTONDOWN:
+                self.send_control_command({"type": "mousedown", "x": x, "y": y, "button": "middle"})
 
-                elif event == cv2.EVENT_MOUSEWHEEL:
-                    dy = flags >> 16
-                    self.send_control_command({"type": "scroll", "x": x, "y": y, "dy": dy})
+            elif event == cv2.EVENT_MBUTTONUP:
+                self.send_control_command({"type": "mouseup", "x": x, "y": y, "button": "middle"})
 
-            except Exception as e:
-                self.log(f"Ошибка мыши: {str(e)}")
+            elif event == cv2.EVENT_MOUSEWHEEL:
+                dy = flags >> 16
+                self.send_control_command({"type": "scroll", "x": x, "y": y, "dy": dy})
+
+        except Exception as e:
+            self.log(f"Ошибка мыши: {str(e)}")
 
 if __name__ == "__main__":
     ClientGUI()

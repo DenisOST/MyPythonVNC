@@ -9,6 +9,7 @@ from PIL import Image
 import zlib
 import tkinter as tk
 import pyautogui
+import sounddevice as sd
 from tkinter import ttk, scrolledtext
 
 class ServerGUI:
@@ -16,6 +17,11 @@ class ServerGUI:
         self.window = tk.Tk()
         self.window.title("Сервер трансляции экрана")
         self.window.geometry("600x400")
+
+        self.HOST = '0.0.0.0'  # Слушаем все доступные интерфейсы
+        self.AUDIO_PORT = 5003  # Добавить новый порт для аудио
+        self.audio_socket = None
+        self.is_audio_running = False
 
         self.is_running = False
         self.server_thread = None
@@ -58,9 +64,17 @@ class ServerGUI:
             self.is_running = True
             self.start_btn.config(text="Остановить сервер")
             self.status_label.config(text="Статус: Работает", foreground="green")
+
+            self.audio_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.audio_socket.bind((self.HOST, self.AUDIO_PORT))
+            self.audio_socket.listen(1)
             
             self.server_thread = threading.Thread(target=self.start_image_server, daemon=True)
             self.server_thread.start()
+
+            audio_thread = threading.Thread(target=self.run_audio_server)
+            audio_thread.daemon = True
+            audio_thread.start()
             
             self.log("Сервер запущен на порту 5001")
 
@@ -85,6 +99,54 @@ class ServerGUI:
         self.stop_server()
         self.window.destroy()
 
+    def run_audio_server(self):
+        try:
+            self.is_audio_running = True
+            audio_conn, _ = self.audio_socket.accept()
+            
+            CHUNK = 1024
+            CHANNELS = 2
+            RATE = 44100
+
+            # Найдем виртуальный кабель среди устройств
+            devices = sd.query_devices()
+            cable_device = None
+            for i, dev in enumerate(devices):
+                if 'CABLE Output' in dev['name']:
+                    cable_device = i
+                    self.log(f"Найден VB-Cable: {dev['name']}")
+                    break
+
+            if cable_device is None:
+                self.log("VB-Cable не найден. Установите VB-Cable для захвата системного звука.")
+                return
+
+            def audio_callback(indata, frames, time, status):
+                try:
+                    if self.is_running:
+                        audio_data = (indata * 32767).astype(np.int16).tobytes()
+                        audio_conn.sendall(len(audio_data).to_bytes(4, 'big') + audio_data)
+                except:
+                    pass
+
+            # Используем VB-Cable как устройство ввода
+            with sd.InputStream(
+                channels=CHANNELS,
+                samplerate=RATE,
+                blocksize=CHUNK,
+                callback=audio_callback,
+                device=cable_device,
+                latency='low'
+            ) as stream:
+                self.log("Аудио поток запущен")
+                while self.is_running:
+                    sd.sleep(100)
+            
+            audio_conn.close()
+            
+        except Exception as e:
+            self.log(f"Ошибка аудио сервера: {str(e)}")
+
     def start_image_server(self):
         self.socket = socket.socket()
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -107,7 +169,7 @@ class ServerGUI:
             prev_frame = None
             last_sent = time.time()
             FORCE_SEND_INTERVAL = 0.3
-            QUALITY = 40
+            QUALITY = 50
 
             # Запуск сервера управления в отдельном потоке
             control_thread = threading.Thread(target=self.run_control_server, daemon=True)
@@ -139,7 +201,7 @@ class ServerGUI:
                         self.log(f"Ошибка отправки: {str(e)}")
                         break
 
-                time.sleep(0.033)
+                time.sleep(0.016)
 
         except Exception as e:
             self.log(f"Ошибка соединения: {str(e)}")
