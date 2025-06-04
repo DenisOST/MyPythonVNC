@@ -49,7 +49,7 @@ class ClientGUI:
             self.fernet = None
 
         self.window.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.window.mainloop()
+        #self.window.mainloop()
 
     def create_widgets(self):
         """Создание элементов интерфейса"""
