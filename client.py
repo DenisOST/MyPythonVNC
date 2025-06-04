@@ -12,9 +12,13 @@ from PIL import Image
 import zlib
 import tkinter as tk
 from tkinter import ttk, scrolledtext
+from cryptography.fernet import Fernet
 
 class ClientGUI:
     def __init__(self):
+        # Добавляем шифрование Fernet
+        self.FERNET_KEY = b'eeoxN_0flIL_f1sC7UwVhcbeOqK7lWjFAO5iZIFC_yw='  # Тот же ключ, что и на сервере
+
         self.window = tk.Tk()
         self.window.title("Клиент трансляции экрана")
         self.window.geometry("600x400")
@@ -36,6 +40,14 @@ class ClientGUI:
 
         # GUI элементы
         self.create_widgets()
+
+        try:
+            self.fernet = Fernet(self.FERNET_KEY)
+            self.log("Шифрование Fernet успешно инициализировано")
+        except Exception as e:
+            self.log(f"Ошибка инициализации шифрования: {str(e)}")
+            self.fernet = None
+
         self.window.protocol("WM_DELETE_WINDOW", self.on_close)
         self.window.mainloop()
 
@@ -82,13 +94,22 @@ class ClientGUI:
             
             self.image_thread = threading.Thread(target=self.receive_images, daemon=True)
             self.image_thread.start()
+            self.log("Видео соединение установлено")
+            if self.fernet:
+                self.log("Видео: защищенное соединение активировано")
 
             self.audio_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.audio_sock.connect((self.ip_entry.get(), self.AUDIO_PORT))
+            self.log("Управление: соединение установлено")
+            if self.fernet:
+                self.log("Управление: защищенное соединение активировано")
 
             audio_thread = threading.Thread(target=self.receive_audio)
             audio_thread.daemon = True
             audio_thread.start()
+            self.log("Аудио соединение установлено")
+            if self.fernet:
+                self.log("Аудио: защищенное соединение активировано")
 
             self.keyboard_listener = threading.Thread(target=self.setup_keyboard_handling, daemon=True)
             self.keyboard_listener.start()
@@ -156,7 +177,6 @@ class ClientGUI:
         self.disconnect()
         self.window.destroy()
 
-
     def receive_audio(self):
         try:
             self.is_audio_connected = True
@@ -181,15 +201,22 @@ class ClientGUI:
                         break
                     size = int.from_bytes(size_data, 'big')
                     
-                    # Получаем аудио данные
-                    data = b""
-                    while len(data) < size:
-                        packet = self.audio_sock.recv(size - len(data))
+                    # Получаем зашифрованные данные
+                    encrypted_audio = b""
+                    while len(encrypted_audio) < size:
+                        packet = self.audio_sock.recv(size - len(encrypted_audio))
                         if not packet:
                             break
-                        data += packet
+                        encrypted_audio += packet
                     
-                    stream.write(data)
+                    # Расшифровка аудио
+                    try:
+                        audio_data = self.fernet.decrypt(encrypted_audio)
+                    except:
+                        self.log("Ошибка расшифровки аудио")
+                        continue
+                    
+                    stream.write(audio_data)
                 except:
                     break
             
@@ -201,7 +228,6 @@ class ClientGUI:
             
         except Exception as e:
             self.log(f"Ошибка аудио потока: {str(e)}")
-
     # Ваша оригинальная функция с небольшими модификациями
     def receive_images(self):
         try:
@@ -225,13 +251,20 @@ class ClientGUI:
                     break
                 size = int.from_bytes(size_data, 'big')
                 
-                # Получаем сжатые данные
-                compressed_data = b""
-                while len(compressed_data) < size:
-                    packet = self.sock.recv(size - len(compressed_data))
+                # Получаем зашифрованные данные
+                encrypted_data = b""
+                while len(encrypted_data) < size:
+                    packet = self.sock.recv(size - len(encrypted_data))
                     if not packet:
                         break
-                    compressed_data += packet
+                    encrypted_data += packet
+                
+                # Расшифровка данных
+                try:
+                    compressed_data = self.fernet.decrypt(encrypted_data)
+                except:
+                    self.log("Ошибка расшифровки видеоданных")
+                    continue
 
                 # Обработка изображения
                 decompressed = zlib.decompress(compressed_data)
@@ -248,10 +281,16 @@ class ClientGUI:
             self.disconnect()
 
     def send_control_command(self, cmd):
-        """Отправка команды управления"""
+        data = json.dumps(cmd).encode()
+        
+        # Шифрование команды перед отправкой
+        encrypted_data = self.fernet.encrypt(data)
+        
         try:
-            data = json.dumps(cmd).encode()
-            self.control_sock.sendall(len(data).to_bytes(4, 'big') + data)
+            # Отправляем размер зашифрованных данных
+            self.control_sock.sendall(len(encrypted_data).to_bytes(4, 'big'))
+            # Отправляем зашифрованные данные
+            self.control_sock.sendall(encrypted_data)
         except Exception as e:
             self.log(f"Ошибка отправки команды: {str(e)}")
 

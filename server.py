@@ -11,9 +11,17 @@ import tkinter as tk
 import pyautogui
 import sounddevice as sd
 from tkinter import ttk, scrolledtext
+from cryptography.fernet import Fernet
+
+# Генерация ключа (выполнить один раз)
+#key = Fernet.generate_key()
+#print("Ваш секретный ключ:", key.decode())
 
 class ServerGUI:
     def __init__(self):
+        # Добавляем шифрование Fernet
+        self.FERNET_KEY = b'eeoxN_0flIL_f1sC7UwVhcbeOqK7lWjFAO5iZIFC_yw='  # Вставьте сюда свой ключ
+
         self.window = tk.Tk()
         self.window.title("Сервер трансляции экрана")
         self.window.geometry("600x400")
@@ -29,6 +37,12 @@ class ServerGUI:
         self.socket = None
 
         self.create_widgets()
+        try:
+            self.fernet = Fernet(self.FERNET_KEY)
+            self.log("Шифрование Fernet успешно инициализировано")
+        except Exception as e:
+            self.log(f"Ошибка инициализации шифрования: {str(e)}")
+            self.fernet = None
         self.window.protocol("WM_DELETE_WINDOW", self.on_close)
         self.window.mainloop()
 
@@ -116,6 +130,9 @@ class ServerGUI:
                     cable_device = i
                     self.log(f"Найден VB-Cable: {dev['name']}")
                     break
+            
+            if self.fernet:
+                self.log(f"Аудио: защищенное соединение установлено с {_[0]}")
 
             if cable_device is None:
                 self.log("VB-Cable не найден. Установите VB-Cable для захвата системного звука.")
@@ -125,7 +142,12 @@ class ServerGUI:
                 try:
                     if self.is_running:
                         audio_data = (indata * 32767).astype(np.int16).tobytes()
-                        audio_conn.sendall(len(audio_data).to_bytes(4, 'big') + audio_data)
+                        
+                        # Шифрование аудио данных
+                        encrypted_audio = self.fernet.encrypt(audio_data)
+                        
+                        # Отправка размера + зашифрованных данных
+                        audio_conn.sendall(len(encrypted_audio).to_bytes(4, 'big') + encrypted_audio)
                 except:
                     pass
 
@@ -162,6 +184,9 @@ class ServerGUI:
         try:
             self.conn, addr = self.socket.accept()
             self.log(f"Клиент подключен: {addr[0]}")
+
+            if self.fernet:
+                self.log(f"Видео: защищенное соединение установлено с {addr[0]}")
             
             info = json.dumps({"width": screen_width, "height": screen_height}).encode()
             self.conn.sendall(len(info).to_bytes(4, 'big') + info)
@@ -193,9 +218,15 @@ class ServerGUI:
                     buf = io.BytesIO()
                     img.save(buf, format='JPEG', quality=QUALITY)
                     data = zlib.compress(buf.getvalue())
+
+                    # Шифрование данных перед отправкой
+                    encrypted_data = self.fernet.encrypt(data)
                     
                     try:
-                        self.conn.sendall(len(data).to_bytes(4, 'big') + data)
+                        # Отправляем размер зашифрованных данных
+                        self.conn.sendall(len(encrypted_data).to_bytes(4, 'big'))
+                        # Отправляем сами зашифрованные данные
+                        self.conn.sendall(encrypted_data)
                         prev_frame = current_frame.copy()
                     except Exception as e:
                         self.log(f"Ошибка отправки: {str(e)}")
@@ -271,20 +302,30 @@ class ServerGUI:
             try:
                 conn, addr = s.accept()
                 self.log(f"Подключение управления: {addr[0]}")
+
+                if self.fernet:
+                    self.log(f"Управление: защищенное соединение установлено с {addr[0]}")
                 
                 while self.is_running:
+                    # Получаем размер зашифрованных данных
                     length_data = conn.recv(4)
                     if not length_data: break
                     length = int.from_bytes(length_data, 'big')
                     
-                    data = b""
-                    while len(data) < length:
-                        packet = conn.recv(length - len(data))
+                    # Получаем зашифрованные данные
+                    encrypted_data = b""
+                    while len(encrypted_data) < length:
+                        packet = conn.recv(length - len(encrypted_data))
                         if not packet: break
-                        data += packet
+                        encrypted_data += packet
                     
-                    cmd = json.loads(data.decode())
-                    self.handle_command(cmd)
+                    try:
+                        # Расшифровываем данные
+                        decrypted_data = self.fernet.decrypt(encrypted_data)
+                        cmd = json.loads(decrypted_data.decode())
+                        self.handle_command(cmd)
+                    except Exception as e:
+                        self.log(f"Ошибка расшифровки команды: {str(e)}")
 
             except Exception as e:
                 self.log(f"Ошибка управления: {str(e)}")
